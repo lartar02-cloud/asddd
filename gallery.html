@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Фотоотчёт — недельная навигация (Fixed Final)</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  body {font-family: Arial, sans-serif; background:#111; color:#eee; margin:0; padding:0; display:flex; flex-direction:column; height:100vh; overflow:hidden;}
+  h2 {margin:8px 16px; font-size:1.5em;}
+  .header {display:flex; align-items:center; padding:8px 16px; background:#1a1a1a; gap:12px; flex-wrap:nowrap;}
+  #changeFileBtn {padding:6px 12px; background:#333; border-radius:6px; font-size:0.8em; cursor:pointer; border:1px solid #555;}
+  #changeFileBtn:hover {background:#444;}
+  #fileInput {display:none;}
+  .info {font-size:0.9em; color:#88ee88; margin-left:auto;}
+  .header-center {display:flex; align-items:center; gap:12px; flex:1; font-weight:bold;}
+  .counter {min-width:60px;}
+  .caption {display:flex; align-items:center; gap:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .icon {width:1.1em; height:1.1em; fill:#aaa; flex-shrink:0;}
+
+  .filterWeek {background:#1a1a1a; padding:8px 16px; display:flex; gap:12px; align-items:center; border-top:1px solid #333; border-bottom:1px solid #333;}
+  .filterWeek select {padding:6px; background:#222; border:1px solid #444; color:#eee; min-width:200px;}
+  .filterWeek button {padding:6px 12px; background:#333; border:1px solid #555; cursor:pointer;}
+
+  .main {flex:1; display:flex; overflow:hidden;}
+  #sheetButtons {width:220px; background:#222; padding:10px 0; overflow-y:auto; border-right:1px solid #333;}
+  #sheetButtons button {display:block; width:90%; margin:4px auto; padding:8px 10px; background:#333; border:none; border-radius:6px; text-align:left; cursor:pointer;}
+  #sheetButtons button.active {background:#007acc;}
+  
+  #headerCaption {
+    font-size: 0.85em;
+    font-weight: normal;
+    color: #ddd;
+}
+
+#statusMsg {
+    display: none !important;
+}
+
+  .content {flex:1; display:flex; flex-direction:column; padding:10px; overflow:hidden;}
+  #zoomContainer {flex:1; overflow:hidden; border-radius:12px; background:#000; display:flex; justify-content:center; align-items:center; cursor:grab;}
+  #mainImg {max-width:100%; max-height:100%; border-radius:8px; object-fit:contain;}
+  .zoomHint {font-size:0.75em; color:#aaa; text-align:center; padding:4px 0;}
+  .navButtons {background:#1a1a1a; padding:8px; text-align:center;}
+  #thumbs {padding:8px; background:#222; border-radius:8px; overflow-x:auto; white-space:nowrap;}
+  #thumbs img {width:80px; height:55px; margin:4px; border-radius:5px; opacity:0.7; cursor:pointer; object-fit:cover;}
+  #thumbs img.active {opacity:1; border:2px solid #007acc;}
+</style>
+</head>
+<body>
+<h2>Фотоотчёт</h2>
+
+<div class="header">
+  <label for="fileInput" id="changeFileBtn">Сменить файл</label>
+  <input type="file" id="fileInput" accept=".xlsx,.xls" />
+
+  <div class="header-center">
+    <div class="counter" id="counter">0 / 0</div>
+    <div class="caption" id="headerCaption">—</div>
+  </div>
+
+  <div class="info" id="statusMsg">Загрузите Excel-файл</div>
+</div>
+
+<div class="filterWeek">
+  <button onclick="prevWeek()">← Предыдущая</button>
+  <label>Неделя: <select id="weekSelect" onchange="changeWeekBySelect()"></select></label>
+  <button onclick="nextWeek()">Следующая →</button>
+</div>
+
+<div class="main">
+  <div id="sheetButtons"></div>
+  <div class="content">
+    <div id="zoomContainer"><img id="mainImg" src="" alt="Фото" /></div>
+    <div class="zoomHint">Колёсико — увеличить • Перетаскивание • Двойной клик — сброс</div>
+    <div class="navButtons">
+      <button onclick="prev()">← Предыдущее</button>
+      <button onclick="next()">Следующее →</button>
+    </div>
+    <div id="thumbs"></div>
+  </div>
+</div>
+
+<script>
+let scale = 1;
+let posX = 0;
+let posY = 0;
+let isDragging = false;
+let startX = 0;
+let startY = 0;
+
+let container, img;
+
+const calendarSVG = `<svg class="icon" viewBox="0 0 16 16"><path d="M5 1h6v1h1V1h2v1h1v12H1V2h1V1h2v1h1V1zM3 4v9h10V4H3zm2-2h6v1H5V2z"/></svg>`;
+const clockSVG = `<svg class="icon" viewBox="0 0 16 16"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12z"/><path d="M8 4v4.5l3.5 2-.5-.866L8 8.25V4z"/></svg>`;
+
+let allPhotos = [], allCaptions = [], allDates = [];
+let photos = [], captions = [], dates = [];
+let index = 0;
+let weekMap = new Map();
+
+function parseDate(val){
+    if (typeof val !== "string") return null;
+
+    val = val.replace(/\u00A0/g, " ").replace(/[–—]/g, "—").trim();
+
+    let regex = /^(пн|вт|ср|чт|пт|сб|вс)\s+(\d{2})\.(\d{2})\.(\d{4})\s+—\s+(\d{2}):(\d{2}):(\d{2})$/i;
+
+    let m = val.match(regex);
+    if (!m) return null;
+
+    return new Date(
+        Number(m[4]),
+        Number(m[3]) - 1,
+        Number(m[2]),
+        Number(m[5]),
+        Number(m[6]),
+        Number(m[7])
+    );
+}
+
+document.getElementById('fileInput').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    const wb = XLSX.read(ev.target.result, {type:'array', cellDates:true});
+    document.getElementById('statusMsg').textContent = 'Загружен: ' + f.name;
+    buildSheetButtons(wb);
+  };
+  r.readAsArrayBuffer(f);
+});
+
+function buildSheetButtons(wb) {
+  const container = document.getElementById('sheetButtons'); container.innerHTML = '';
+  wb.SheetNames.forEach((name, i) => {
+    const b = document.createElement('button'); 
+    b.textContent = name;
+    b.onclick = () => loadSheet(wb.Sheets[name], b);
+    container.appendChild(b);
+    if (i === 0) setTimeout(() => b.click(), 100);
+  });
+}
+
+function loadSheet(sheet, btn) {
+  document.querySelectorAll('#sheetButtons button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  const rows = XLSX.utils.sheet_to_json(sheet, {defval:''});
+
+  allPhotos = []; allCaptions = []; allDates = [];
+
+  rows.forEach(r => {
+    let p = r['RelativePath'] || r['Фото'] || r['File'] || r['Path'] || r['Путь'];
+    if (!p) return;
+
+    p = String(p).replace(/\\/g, '/');
+
+    let rawCap = r['Подпись'] || '';
+    let dt = parseDate(rawCap);
+
+    let cap = rawCap
+      .replace(/(пн|вт|ср|чт|пт|сб|вс)/gi, '')
+      .replace(/\b\d{1,2}\.\d{1,2}\.\d{4}\b/g, '')
+      .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g, '')
+      .replace(/[—–]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (r['Событие']) cap += (cap ? ' | ' : '') + `Событие: ${r['Событие']}`;
+    if (r['Объект'])   cap += (cap ? ' | ' : '') + 'Объект: '   + r['Объект'];
+    if (r['Груз']) cap += (cap ? ' | ' : '') + `Груз: ${r['Груз']}`;
+    if (r['Примечание']) cap += (cap ? ' | ' : '') + `Примечание: ${r['Примечание']}`;
+
+    allPhotos.push(p);
+    allCaptions.push(cap);
+    allDates.push(dt);
+  });
+
+  buildWeekMap();
+  fillWeekSelect();
+
+  const keys = Array.from(weekMap.keys()).sort();
+  const lastKey = keys[keys.length - 1];
+  document.getElementById('weekSelect').value = lastKey;
+  changeWeekBySelect();
+}
+
+function getMonday(d) {
+    const dt = new Date(d);
+    const day = dt.getDay();
+    const diff = (day === 0 ? -6 : 1 - day);
+    const monday = new Date(dt);
+    monday.setDate(dt.getDate() + diff);
+    monday.setHours(0,0,0,0);
+    return monday;
+}
+
+function formatDate(d) {
+  return d.toLocaleDateString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric'});
+}
+
+function buildWeekMap() {
+  weekMap.clear();
+  allDates.forEach(dt => {
+    if (!dt) return;
+    let monday = getMonday(dt);
+    let sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    sunday.setHours(23,59,59,999);
+
+    const key = monday.toISOString().slice(0,10);
+    if (!weekMap.has(key)) {
+      weekMap.set(key, {
+        mon: monday,
+        sun: sunday,
+        label: `${formatDate(monday)} — ${formatDate(sunday)}`
+      });
+    }
+  });
+}
+
+function fillWeekSelect() {
+  const select = document.getElementById('weekSelect');
+  select.innerHTML = '';
+  const sortedKeys = Array.from(weekMap.keys()).sort();
+  sortedKeys.forEach(key => {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = weekMap.get(key).label;
+    select.appendChild(opt);
+  });
+}
+
+function changeWeekBySelect() {
+  const key = document.getElementById('weekSelect').value;
+  applyWeekFilter(key);
+}
+
+function prevWeek() {
+  const keys = Array.from(weekMap.keys()).sort();
+  const cur = document.getElementById('weekSelect').value;
+  const idx = keys.indexOf(cur);
+  if (idx > 0) {
+    document.getElementById('weekSelect').value = keys[idx-1];
+    applyWeekFilter(keys[idx-1]);
+  }
+}
+
+function nextWeek() {
+  const keys = Array.from(weekMap.keys()).sort();
+  const cur = document.getElementById('weekSelect').value;
+  const idx = keys.indexOf(cur);
+  if (idx < keys.length-1) {
+    document.getElementById('weekSelect').value = keys[idx+1];
+    applyWeekFilter(keys[idx+1]);
+  }
+}
+
+function applyWeekFilter(weekKey) {
+  const range = weekMap.get(weekKey);
+  if (!range) return;
+
+  photos = []; captions = []; dates = [];
+
+  allDates.forEach((dt, i) => {
+    if (dt && dt >= range.mon && dt <= range.sun) {
+      photos.push(allPhotos[i]);
+      captions.push(allCaptions[i]);
+      dates.push(dt);
+    }
+  });
+
+  index = 0;
+  showPhoto();
+  renderThumbs();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  container = document.getElementById('zoomContainer');
+  img = document.getElementById('mainImg');
+
+  container.addEventListener('wheel', e => {
+    e.preventDefault();
+    scale = Math.min(Math.max(0.5, scale * (e.deltaY > 0 ? 0.9 : 1.1)), 10);
+    updateTransform();
+  });
+
+  container.addEventListener('mousedown', e => {
+    if (scale <= 1) return;
+    isDragging = true;
+    startX = e.clientX - posX;
+    startY = e.clientY - posY;
+    container.classList.add('dragging');
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    posX = e.clientX - startX;
+    posY = e.clientY - startY;
+    updateTransform();
+  });
+
+  document.addEventListener('mouseup', () => {
+    isDragging = false;
+    container.classList.remove('dragging');
+  });
+
+  container.addEventListener('dblclick', () => {
+    scale = 1;
+    posX = 0;
+    posY = 0;
+    updateTransform();
+  });
+});
+
+function updateTransform() {
+  img.style.transform = `translate(${posX}px, ${posY}px) scale(${scale})`;
+}
+
+function showPhoto() {
+  if (!photos.length) {
+    document.getElementById('headerCaption').innerHTML = '—';
+    document.getElementById('counter').textContent = '0 / 0';
+    document.getElementById('mainImg').src = '';
+    return;
+  }
+
+  document.getElementById('mainImg').src = photos[index];
+
+  const dt = dates[index];
+  let captionHTML = '';
+
+  if (dt) {
+    const dayName = dt.toLocaleDateString('ru-RU', {weekday:'short'});
+    const dateStr = formatDate(dt);
+    const timeStr = dt.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+    captionHTML = `${calendarSVG} <span>${dayName}</span> ${dateStr} — ${clockSVG} ${timeStr}`;
+    if (captions[index]) captionHTML += ` | ${captions[index]}`;
+  } else if (captions[index]) {
+    captionHTML = captions[index];
+  }
+
+  document.getElementById('headerCaption').innerHTML = captionHTML;
+  document.getElementById('counter').textContent = `${index+1} / ${photos.length}`;
+}
+
+function renderThumbs() {
+  const container = document.getElementById('thumbs');
+  container.innerHTML = '';
+  photos.forEach((src, i) => {
+    const img = document.createElement('img');
+    img.src = src;
+    if (i === index) img.classList.add('active');
+    img.onclick = () => { index = i; showPhoto(); renderThumbs(); };
+    container.appendChild(img);
+  });
+}
+
+function prev() { index = (index - 1 + photos.length) % photos.length; showPhoto(); renderThumbs(); }
+function next() { index = (index + 1) % photos.length; showPhoto(); renderThumbs(); }
+
+</script>
+</body>
+</html>
